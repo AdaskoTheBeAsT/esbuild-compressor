@@ -1,13 +1,13 @@
 {
   "name": "@adaskothebeast/esbuild-compressor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": false,
   "type": "commonjs",
   "main": "./src/index.js",
   "types": "./src/index.d.ts",
   "dependencies": {},
   "peerDependencies": {
-    "esbuild": "^0.24.2",
+    "esbuild": "^0.28.1",
     "tslib": "^2.8.1"
   }
 }
