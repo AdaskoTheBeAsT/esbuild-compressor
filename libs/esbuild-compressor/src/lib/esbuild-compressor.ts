@@ -1,12 +1,8 @@
-// compress-plugin.ts
+import { createHash } from 'node:crypto';
+import { promisify } from 'node:util';
+import * as zlib from 'node:zlib';
 
-import * as fs2 from 'fs';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { promisify } from 'util';
-import * as zlib from 'zlib';
-
-import type { Plugin } from 'esbuild';
+import type { OutputFile, Plugin } from 'esbuild';
 
 const gzip = promisify(zlib.gzip);
 const brotliCompress = promisify(zlib.brotliCompress);
@@ -41,7 +37,6 @@ type CompressionPluginOptions = {
     params?: Record<string, number>;
   };
   skipFilesPattern?: string;
-  outputDir?: string;
 };
 
 function normalizeBrotliParams(
@@ -70,6 +65,20 @@ function normalizeBrotliParams(
   return normalized;
 }
 
+function createCompressedOutputFile(
+  path: string,
+  contents: Uint8Array,
+): OutputFile {
+  return {
+    path,
+    contents,
+    hash: createHash('sha256').update(contents).digest('hex'),
+    get text() {
+      return Buffer.from(contents).toString('utf8');
+    },
+  };
+}
+
 export default function compressionPlugin(
   options?: CompressionPluginOptions,
 ): Plugin {
@@ -88,8 +97,6 @@ export default function compressionPlugin(
     ? new RegExp(options.skipFilesPattern)
     : undefined;
 
-  const outdir = path.join(process.cwd(), options?.outputDir || '');
-
   return {
     name: 'compress-plugin',
     setup(build) {
@@ -98,42 +105,33 @@ export default function compressionPlugin(
           return;
         }
 
-        if (!fs2.existsSync(outdir)) {
-          fs2.mkdirSync(outdir, { recursive: true });
-        }
+        const filesToCompress = [...result.outputFiles];
+        const compressedFiles = await Promise.all(
+          filesToCompress.map(async (outputFile) => {
+            const extension = outputFile.path.slice(
+              outputFile.path.lastIndexOf('.'),
+            );
 
-        console.log('outdir: ', outdir);
-
-        await Promise.all(
-          result.outputFiles.map(async (outputFile) => {
-            let originalPath = outputFile.path;
-            if (!path.isAbsolute(originalPath) && outdir) {
-              // If the output file path is relative, join it with the outdir.
-              // Assuming outdir is relative to process.cwd()
-              originalPath = path.join(outdir, outputFile.path);
-            } else {
-              originalPath = path.join(outdir, path.basename(outputFile.path));
-            }
-            const extension = originalPath.slice(originalPath.lastIndexOf('.'));
-
-            // If the file path matches the skip pattern, do nothing.
-            if (skipFilesRegExp?.test(originalPath)) {
-              console.log(`Skipping file: ${originalPath}`);
-              return;
+            if (
+              skipFilesRegExp?.test(outputFile.path) ||
+              !compressibleExtensions.includes(extension)
+            ) {
+              return [];
             }
 
-            if (compressibleExtensions.includes(extension)) {
-              const contents = outputFile.contents;
-              const gzipped = await gzip(contents, gzipOptions);
-              const brotli = await brotliCompress(contents, brotliOptions);
+            const [gzipped, brotli] = await Promise.all([
+              gzip(outputFile.contents, gzipOptions),
+              brotliCompress(outputFile.contents, brotliOptions),
+            ]);
 
-              await Promise.all([
-                fs.writeFile(`${originalPath}.gz`, gzipped),
-                fs.writeFile(`${originalPath}.br`, brotli),
-              ]);
-            }
+            return [
+              createCompressedOutputFile(`${outputFile.path}.gz`, gzipped),
+              createCompressedOutputFile(`${outputFile.path}.br`, brotli),
+            ];
           }),
         );
+
+        result.outputFiles.push(...compressedFiles.flat());
       });
     },
   };

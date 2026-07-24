@@ -1,6 +1,6 @@
 {
   "name": "@adaskothebeast/esbuild-compressor",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": false,
   "type": "commonjs",
   "main": "./src/index.js",

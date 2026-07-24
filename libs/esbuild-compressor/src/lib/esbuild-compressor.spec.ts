@@ -1,5 +1,4 @@
-// compress-plugin.test.ts
-import { promises as fs } from 'fs';
+import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 
 import type {
   BuildResult,
@@ -11,9 +10,6 @@ import type {
 import compressionPlugin from './esbuild-compressor'; // adjust the path if necessary
 
 describe('compressionPlugin', () => {
-  // Spy on fs.writeFile so we can verify its calls without writing to disk.
-  let writeFileSpy: jest.SpyInstance;
-
   // We'll capture the onEnd callback here so that we can invoke it in our tests.
   let onEndCallback: (
     result: BuildResult,
@@ -30,15 +26,7 @@ describe('compressionPlugin', () => {
     },
   };
 
-  beforeEach(() => {
-    writeFileSpy = jest.spyOn(fs, 'writeFile').mockResolvedValue();
-  });
-
-  afterEach(() => {
-    writeFileSpy.mockRestore();
-  });
-
-  test('compresses file with a compressible extension', async () => {
+  test('adds compressed output files for a compressible extension', async () => {
     // Create the plugin with default options.
     const plugin = compressionPlugin();
     plugin.setup(fakeBuild as PluginBuild);
@@ -64,10 +52,15 @@ describe('compressionPlugin', () => {
     };
     await onEndCallback(result);
 
-    // We expect two calls: one for the .gz file and one for the .br file.
-    expect(writeFileSpy).toHaveBeenCalledTimes(2);
-    expect(writeFileSpy).toHaveBeenCalledWith('test.js.gz', expect.any(Buffer));
-    expect(writeFileSpy).toHaveBeenCalledWith('test.js.br', expect.any(Buffer));
+    expect(result.outputFiles).toHaveLength(3);
+    const gzipFile = result.outputFiles[1];
+    const brotliFile = result.outputFiles[2];
+    expect(gzipFile.path).toBe('test.js.gz');
+    expect(brotliFile.path).toBe('test.js.br');
+    expect(gunzipSync(gzipFile.contents).toString()).toBe('hello world');
+    expect(brotliDecompressSync(brotliFile.contents).toString()).toBe(
+      'hello world',
+    );
   });
 
   test('skips files matching the skipFilesPattern', async () => {
@@ -95,8 +88,7 @@ describe('compressionPlugin', () => {
     };
     await onEndCallback(result);
 
-    // No file should be written since the file matches the skip pattern.
-    expect(writeFileSpy).not.toHaveBeenCalled();
+    expect(result.outputFiles).toHaveLength(1);
   });
 
   test('does not compress files with a non-compressible extension', async () => {
@@ -123,8 +115,7 @@ describe('compressionPlugin', () => {
     };
     await onEndCallback(result);
 
-    // Expect that no files were written because ".png" is not compressible.
-    expect(writeFileSpy).not.toHaveBeenCalled();
+    expect(result.outputFiles).toHaveLength(1);
   });
 
   test('does nothing if outputFiles is undefined', async () => {
@@ -135,6 +126,6 @@ describe('compressionPlugin', () => {
     const result: BuildResult = {} as BuildResult;
     await onEndCallback(result);
 
-    expect(writeFileSpy).not.toHaveBeenCalled();
+    expect(result.outputFiles).toBeUndefined();
   });
 });
