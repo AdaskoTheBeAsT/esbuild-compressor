@@ -7,6 +7,7 @@ import type { AvifOptions, WebpOptions } from 'sharp';
 import sharp from 'sharp';
 
 import type { CompressionPluginOptions } from './esbuild-compressor';
+import { compressZstd, resolveZstdOptions } from './zstd-compressor';
 
 const gzip = promisify(zlib.gzip);
 const brotliCompress = promisify(zlib.brotliCompress);
@@ -111,6 +112,9 @@ export async function compressDirectory(
           [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT,
         },
       };
+  const gzipEnabled = options.gzip ?? true;
+  const brotliEnabled = options.brotli ?? true;
+  const zstdOptions = resolveZstdOptions(options.zstd, options.zstdOptions);
   const result: DirectoryCompressionResult = {
     compressedFiles: [],
     imageFiles: [],
@@ -128,17 +132,29 @@ export async function compressDirectory(
     const extension = path.extname(filePath).toLowerCase();
     if (compressibleExtensions.has(extension)) {
       const contents = await fs.readFile(filePath);
-      const [gzipped, brotli] = await Promise.all([
-        gzip(contents, gzipOptions),
-        brotliCompress(contents, brotliOptions),
+      const [gzipped, brotli, zstd] = await Promise.all([
+        gzipEnabled ? gzip(contents, gzipOptions) : undefined,
+        brotliEnabled ? brotliCompress(contents, brotliOptions) : undefined,
+        zstdOptions ? compressZstd(contents, zstdOptions) : undefined,
       ]);
-      const gzipPath = `${filePath}.gz`;
-      const brotliPath = `${filePath}.br`;
-      await Promise.all([
-        fs.writeFile(gzipPath, gzipped),
-        fs.writeFile(brotliPath, brotli),
-      ]);
-      result.compressedFiles.push(gzipPath, brotliPath);
+
+      if (gzipped) {
+        const gzipPath = `${filePath}.gz`;
+        await fs.writeFile(gzipPath, gzipped);
+        result.compressedFiles.push(gzipPath);
+      }
+
+      if (brotli) {
+        const brotliPath = `${filePath}.br`;
+        await fs.writeFile(brotliPath, brotli);
+        result.compressedFiles.push(brotliPath);
+      }
+
+      if (zstd) {
+        const zstdPath = `${filePath}.zst`;
+        await fs.writeFile(zstdPath, zstd);
+        result.compressedFiles.push(zstdPath);
+      }
     }
 
     if (!imageExtensions.has(extension) || !options.imageFormats) {

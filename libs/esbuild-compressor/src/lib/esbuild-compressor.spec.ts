@@ -1,7 +1,11 @@
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { brotliDecompressSync, gunzipSync } from 'node:zlib';
+import {
+  brotliDecompressSync,
+  gunzipSync,
+  zstdDecompressSync,
+} from 'node:zlib';
 
 import type {
   BuildResult,
@@ -169,6 +173,100 @@ describe('compressionPlugin', () => {
     );
     warnSpy.mockRestore();
   });
+
+  test('adds a zstd variant when zstd compression is enabled', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+    const plugin = compressionPlugin({
+      zstdOptions: {
+        params: {
+          ZSTD_c_compressionLevel: 22,
+          '101': 0,
+          UNKNOWN_PARAMETER: 1,
+        },
+      },
+    });
+    plugin.setup(fakeBuild as PluginBuild);
+
+    const result: BuildResult = {
+      outputFiles: [
+        {
+          path: 'zstd.js',
+          contents: Buffer.from('zstd content'),
+          hash: 'fake-hash',
+          text: 'zstd content',
+        },
+      ],
+      errors: [],
+      warnings: [],
+      metafile: { inputs: {}, outputs: {} },
+      mangleCache: {},
+    };
+    await onEndCallback(result);
+
+    expect(result.outputFiles).toHaveLength(4);
+    const zstdFile = result.outputFiles[3];
+    expect(zstdFile.path).toBe('zstd.js.zst');
+    expect(zstdDecompressSync(zstdFile.contents).toString()).toBe(
+      'zstd content',
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Unknown Zstd parameter key: UNKNOWN_PARAMETER',
+    );
+    warnSpy.mockRestore();
+  });
+
+  test('honors gzip and brotli toggles', async () => {
+    const plugin = compressionPlugin({ gzip: false, zstd: true });
+    plugin.setup(fakeBuild as PluginBuild);
+
+    const result: BuildResult = {
+      outputFiles: [
+        {
+          path: 'toggles.js',
+          contents: Buffer.from('toggles'),
+          hash: 'fake-hash',
+          text: 'toggles',
+        },
+      ],
+      errors: [],
+      warnings: [],
+      metafile: { inputs: {}, outputs: {} },
+      mangleCache: {},
+    };
+    await onEndCallback(result);
+
+    expect(result.outputFiles.map((file) => file.path)).toEqual([
+      'toggles.js',
+      'toggles.js.br',
+      'toggles.js.zst',
+    ]);
+  });
+
+  test('omits the zstd variant when zstd is disabled explicitly', async () => {
+    const plugin = compressionPlugin({
+      zstd: false,
+      zstdOptions: { params: { ZSTD_c_compressionLevel: 22 } },
+    });
+    plugin.setup(fakeBuild as PluginBuild);
+
+    const result: BuildResult = {
+      outputFiles: [
+        {
+          path: 'no-zstd.js',
+          contents: Buffer.from('no zstd'),
+          hash: 'fake-hash',
+          text: 'no zstd',
+        },
+      ],
+      errors: [],
+      warnings: [],
+      metafile: { inputs: {}, outputs: {} },
+      mangleCache: {},
+    };
+    await onEndCallback(result);
+
+    expect(result.outputFiles).toHaveLength(3);
+  });
 });
 
 describe('compressDirectory', () => {
@@ -257,6 +355,44 @@ describe('compressDirectory', () => {
       'Unknown Brotli parameter key: UNKNOWN_PARAMETER',
     );
     warnSpy.mockRestore();
+  });
+
+  test('writes zstd variants when enabled with default parameters', async () => {
+    await fs.writeFile(path.join(directory, 'app.js'), 'console.log("app");');
+
+    const result = await compressDirectory({
+      directory,
+      extensions: ['.js'],
+      zstd: true,
+    });
+
+    expect(result.compressedFiles).toEqual([
+      path.join(directory, 'app.js.gz'),
+      path.join(directory, 'app.js.br'),
+      path.join(directory, 'app.js.zst'),
+    ]);
+    expect(
+      zstdDecompressSync(
+        await fs.readFile(path.join(directory, 'app.js.zst')),
+      ).toString(),
+    ).toBe('console.log("app");');
+  });
+
+  test('can emit only brotli variants', async () => {
+    await fs.writeFile(path.join(directory, 'only.js'), 'console.log("only");');
+
+    const result = await compressDirectory({
+      directory,
+      extensions: ['.js'],
+      gzip: false,
+    });
+
+    expect(result.compressedFiles).toEqual([
+      path.join(directory, 'only.js.br'),
+    ]);
+    await expect(
+      fs.access(path.join(directory, 'only.js.gz')),
+    ).rejects.toThrow();
   });
 
   test.each([

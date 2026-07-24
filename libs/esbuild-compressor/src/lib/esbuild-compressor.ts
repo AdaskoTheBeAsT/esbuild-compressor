@@ -4,6 +4,9 @@ import * as zlib from 'node:zlib';
 
 import type { OutputFile, Plugin } from 'esbuild';
 
+import type { ZstdCompressionOptions } from './zstd-compressor';
+import { compressZstd, resolveZstdOptions } from './zstd-compressor';
+
 const gzip = promisify(zlib.gzip);
 const brotliCompress = promisify(zlib.brotliCompress);
 
@@ -32,10 +35,14 @@ const defaultCompressibleExtensions: string[] = [
 
 export type CompressionPluginOptions = {
   extensions?: string[];
+  gzip?: boolean;
   gzipOptions?: zlib.ZlibOptions;
+  brotli?: boolean;
   brotliOptions?: {
     params?: Record<string, number>;
   };
+  zstd?: boolean;
+  zstdOptions?: ZstdCompressionOptions;
   skipFilesPattern?: string;
 };
 
@@ -96,6 +103,9 @@ export default function compressionPlugin(
   const skipFilesRegExp = options?.skipFilesPattern
     ? new RegExp(options.skipFilesPattern)
     : undefined;
+  const gzipEnabled = options?.gzip ?? true;
+  const brotliEnabled = options?.brotli ?? true;
+  const zstdOptions = resolveZstdOptions(options?.zstd, options?.zstdOptions);
 
   return {
     name: 'compress-plugin',
@@ -119,15 +129,37 @@ export default function compressionPlugin(
               return [];
             }
 
-            const [gzipped, brotli] = await Promise.all([
-              gzip(outputFile.contents, gzipOptions),
-              brotliCompress(outputFile.contents, brotliOptions),
+            const [gzipped, brotli, zstd] = await Promise.all([
+              gzipEnabled ? gzip(outputFile.contents, gzipOptions) : undefined,
+              brotliEnabled
+                ? brotliCompress(outputFile.contents, brotliOptions)
+                : undefined,
+              zstdOptions
+                ? compressZstd(outputFile.contents, zstdOptions)
+                : undefined,
             ]);
 
-            return [
-              createCompressedOutputFile(`${outputFile.path}.gz`, gzipped),
-              createCompressedOutputFile(`${outputFile.path}.br`, brotli),
-            ];
+            const compressed: OutputFile[] = [];
+
+            if (gzipped) {
+              compressed.push(
+                createCompressedOutputFile(`${outputFile.path}.gz`, gzipped),
+              );
+            }
+
+            if (brotli) {
+              compressed.push(
+                createCompressedOutputFile(`${outputFile.path}.br`, brotli),
+              );
+            }
+
+            if (zstd) {
+              compressed.push(
+                createCompressedOutputFile(`${outputFile.path}.zst`, zstd),
+              );
+            }
+
+            return compressed;
           }),
         );
 

@@ -1,23 +1,34 @@
 # esbuild-compressor
 
-Tools for creating pre-compressed `.gz` and `.br` assets from esbuild output or
-from a completed build directory. It is maintained as an Nx library and
-published as `@adaskothebeast/esbuild-compressor`.
+Tools for creating pre-compressed `.gz`, `.br`, and optional `.zst` assets from
+esbuild output or from a completed build directory. It is maintained as an Nx
+library and published as `@adaskothebeast/esbuild-compressor`.
 
 ## ✨ What it does
 
 The package provides two complementary modes:
 
-- An esbuild plugin that adds Gzip and Brotli variants to in-memory output
-  files, for pipelines that pass every desired asset through esbuild.
+- An esbuild plugin that adds Gzip, Brotli, and optional Zstandard variants to
+  in-memory output files, for pipelines that pass every desired asset through
+  esbuild.
 - A post-build CLI that scans the final output directory. Use this with Angular
   application builds to compress JavaScript, CSS, HTML, JSON, and SVG files,
   and to create AVIF/WebP versions of PNG and JPEG images.
 
-`js`, `mjs`, `cjs`, `css`, `html`, `svg`, `txt`, and `json`.
+The default extension list is `js`, `mjs`, `cjs`, `css`, `html`, `svg`, `txt`,
+and `json`.
 
-Compression uses Node's `zlib` implementation. By default it uses best Gzip
-compression and maximum-quality text-mode Brotli compression.
+Compression uses Node's `zlib` implementation, so no external binaries are
+required, not even for Zstandard. By default it uses best Gzip compression and
+maximum-quality text-mode Brotli compression. Zstandard is opt-in.
+
+Each algorithm can be toggled independently:
+
+| Algorithm | Flag | Default | Output |
+| --- | --- | --- | --- |
+| Gzip | `gzip` | enabled | `<file>.gz` |
+| Brotli | `brotli` | enabled | `<file>.br` |
+| Zstandard | `zstd` | disabled | `<file>.zst` |
 
 ## 🧰 Development setup
 
@@ -44,9 +55,12 @@ Run these commands from the repository root.
 ```text
 libs/esbuild-compressor/
 ├── src/
+│   ├── cli.ts                       # Post-build directory CLI
 │   ├── index.ts                     # Library entry point
 │   └── lib/
+│       ├── directory-compressor.ts  # Post-build directory implementation
 │       ├── esbuild-compressor.ts    # Plugin implementation
+│       ├── zstd-compressor.ts       # Optional Zstandard support
 │       └── esbuild-compressor.spec.ts
 ├── jest.config.ts
 ├── project.json                     # Nx build target
@@ -60,8 +74,12 @@ The plugin accepts an optional configuration object:
 | Option | Purpose |
 | --- | --- |
 | `extensions` | File extensions eligible for compression. |
+| `gzip` | Set to `false` to skip `.gz` output. Enabled by default. |
 | `gzipOptions` | Node `zlib` options for Gzip output. |
+| `brotli` | Set to `false` to skip `.br` output. Enabled by default. |
 | `brotliOptions` | Brotli options, including `params`. |
+| `zstd` | Set to `true` to emit `.zst` output. Disabled by default. |
+| `zstdOptions` | Zstandard options, including `params`. Providing this implies `zstd: true`. |
 | `skipFilesPattern` | Regular-expression pattern for files to leave uncompressed. |
 
 ### Option details
@@ -121,11 +139,59 @@ When omitted, the plugin uses maximum Brotli quality and text mode. Confirm
 compression-time and output-size trade-offs for your application before using
 the maximum quality level in every build.
 
+#### `gzip` and `brotli`
+
+Both algorithms run by default. Set the flag to `false` to skip one of them, for
+example when a CDN already handles Gzip and you only want to ship Brotli:
+
+```json
+{
+  "gzip": false,
+  "brotli": true
+}
+```
+
+#### `zstd` and `zstdOptions`
+
+Zstandard output is opt-in. Enable it with `"zstd": true` for the default
+compression level (19), or supply `zstdOptions.params` for full control.
+Providing `zstdOptions` implies `zstd: true`; `"zstd": false` always wins.
+
+```json
+{
+  "zstd": true,
+  "zstdOptions": {
+    "params": {
+      "ZSTD_c_compressionLevel": 22,
+      "ZSTD_c_checksumFlag": 0
+    }
+  }
+}
+```
+
+Any `ZSTD_c_*` name from
+[Node's Zstd constants](https://nodejs.org/api/zlib.html#zstd-constants) is
+accepted, as are raw numeric parameter ids. Unknown keys are reported through
+`console.warn` and ignored.
+
+Zstandard compression uses `zlib.zstdCompress`, available in Node.js 22.15 and
+24 or newer. On an older runtime the compressor warns once and simply skips
+`.zst` output instead of failing the build. No `zstd` CLI binary is needed.
+
+> ⚠️ **Before you enable `zstd`, check that your web server can serve it.**
+> There is no nginx module that serves pre-compressed `.zst` files the way
+> `gzip_static` and `brotli_static` do, and nginx has no `zstd_static`
+> equivalent in the mainline distribution. `Content-Encoding: zstd` is supported
+> by current Chromium and Firefox, but on nginx you would have to map the files
+> manually (for example with `try_files` plus an explicit
+> `Content-Encoding: zstd` header) or use a server that supports it natively,
+> such as Caddy or Envoy. Keep Gzip and Brotli enabled as the portable baseline.
+
 ### Skipping files with `skipFilesPattern`
 
 `skipFilesPattern` is a JavaScript regular-expression string that is tested
 against each output file path. If it matches, the plugin leaves that file
-unchanged and does not create its `.gz` or `.br` variants. Use it for assets
+unchanged and does not create its `.gz`, `.br`, or `.zst` variants. Use it for assets
 that must remain readable at runtime, are already compressed, or are served
 with special handling.
 
@@ -202,6 +268,9 @@ module.exports = {
   brotliOptions: {
     params: { BROTLI_PARAM_QUALITY: 11 },
   },
+  // Optional, see the zstd caveat above before enabling it.
+  // zstd: true,
+  // zstdOptions: { params: { ZSTD_c_compressionLevel: 22 } },
   imageExtensions: ['.png', '.jpg', '.jpeg'],
   imageFormats: {
     avif: { quality: 50 },
