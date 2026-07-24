@@ -1,3 +1,6 @@
+import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 
 import type {
@@ -6,7 +9,9 @@ import type {
   OutputFile,
   PluginBuild,
 } from 'esbuild';
+import sharp from 'sharp';
 
+import { compressDirectory } from './directory-compressor';
 import compressionPlugin from './esbuild-compressor'; // adjust the path if necessary
 
 describe('compressionPlugin', () => {
@@ -127,5 +132,161 @@ describe('compressionPlugin', () => {
     await onEndCallback(result);
 
     expect(result.outputFiles).toBeUndefined();
+  });
+
+  test('accepts custom Brotli parameters', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+    const plugin = compressionPlugin({
+      brotliOptions: {
+        params: {
+          BROTLI_PARAM_QUALITY: 4,
+          '1': 4,
+          UNKNOWN_PARAMETER: 1,
+        },
+      },
+    });
+    plugin.setup(fakeBuild as PluginBuild);
+
+    const result: BuildResult = {
+      outputFiles: [
+        {
+          path: 'custom.js',
+          contents: Buffer.from('custom options'),
+          hash: 'fake-hash',
+          text: 'custom options',
+        },
+      ],
+      errors: [],
+      warnings: [],
+      metafile: { inputs: {}, outputs: {} },
+      mangleCache: {},
+    };
+    await onEndCallback(result);
+
+    expect(result.outputFiles).toHaveLength(3);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Unknown Brotli parameter key: UNKNOWN_PARAMETER',
+    );
+    warnSpy.mockRestore();
+  });
+});
+
+describe('compressDirectory', () => {
+  let directory: string;
+
+  beforeEach(async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'esbuild-compressor-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  test('compresses final assets and creates configured image formats', async () => {
+    await Promise.all([
+      fs.writeFile(path.join(directory, 'main.js'), 'console.log("main");'),
+      fs.writeFile(path.join(directory, 'styles.css'), 'body { color: red; }'),
+      fs.writeFile(path.join(directory, 'env-config.js'), 'window.env = {};'),
+      sharp({
+        create: {
+          width: 1,
+          height: 1,
+          channels: 3,
+          background: '#ff0000',
+        },
+      })
+        .png()
+        .toFile(path.join(directory, 'logo.png')),
+    ]);
+
+    const result = await compressDirectory({
+      directory,
+      extensions: ['.js', '.css'],
+      skipFilesPattern: 'env-config.*\\.js$',
+      imageFormats: {
+        avif: { quality: 50 },
+        webp: { quality: 75 },
+      },
+    });
+
+    expect(result.compressedFiles).toHaveLength(4);
+    expect(result.imageFiles).toHaveLength(2);
+    await expect(
+      fs.access(path.join(directory, 'main.js.gz')),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(directory, 'styles.css.br')),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(directory, 'env-config.js.gz')),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(path.join(directory, 'logo.avif')),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(directory, 'logo.webp')),
+    ).resolves.toBeUndefined();
+  });
+
+  test('uses defaults recursively and accepts custom compression options', async () => {
+    const nestedDirectory = path.join(directory, 'nested');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+    await fs.mkdir(nestedDirectory);
+    await fs.writeFile(
+      path.join(nestedDirectory, 'routes.json'),
+      '{"routes":[]}',
+    );
+
+    const result = await compressDirectory({
+      directory,
+      gzipOptions: { level: 6 },
+      brotliOptions: {
+        params: {
+          BROTLI_PARAM_QUALITY: 4,
+          '1': 4,
+          UNKNOWN_PARAMETER: 1,
+        },
+      },
+    });
+
+    expect(result.compressedFiles).toEqual([
+      path.join(nestedDirectory, 'routes.json.gz'),
+      path.join(nestedDirectory, 'routes.json.br'),
+    ]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Unknown Brotli parameter key: UNKNOWN_PARAMETER',
+    );
+    warnSpy.mockRestore();
+  });
+
+  test.each([
+    ['avif', 'webp'],
+    ['webp', 'avif'],
+  ] as const)('can create only a %s image', async (format, missingFormat) => {
+    await sharp({
+      create: {
+        width: 1,
+        height: 1,
+        channels: 3,
+        background: '#00ff00',
+      },
+    })
+      .png()
+      .toFile(path.join(directory, 'icon.png'));
+
+    await compressDirectory({
+      directory,
+      imageFormats:
+        format === 'avif'
+          ? { avif: { quality: 50 } }
+          : { webp: { quality: 75 } },
+    });
+
+    await expect(
+      fs.access(path.join(directory, `icon.${format}`)),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(directory, `icon.${missingFormat}`)),
+    ).rejects.toThrow();
   });
 });

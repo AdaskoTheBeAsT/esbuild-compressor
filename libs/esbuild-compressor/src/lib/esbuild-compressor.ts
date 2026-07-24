@@ -30,10 +30,10 @@ const defaultCompressibleExtensions: string[] = [
   '.json',
 ];
 
-type CompressionPluginOptions = {
+export type CompressionPluginOptions = {
   extensions?: string[];
   gzipOptions?: zlib.ZlibOptions;
-  brotliOptions?: Record<string, number> & {
+  brotliOptions?: {
     params?: Record<string, number>;
   };
   skipFilesPattern?: string;
